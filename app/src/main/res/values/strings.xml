@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">HyperOS Desktop Smooth</string>
+    <string name="app_description">Experimental mitigation for HyperOS Runtime desktop frame drops: keeps the desktop process out of cached-app compaction/freezing and caps background trim levels. Dry-run by default.</string>
+</resources>

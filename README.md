@@ -2,7 +2,7 @@
 
 面向「HyperOS 平板新 Rust 桌面越用越掉帧」的 LSPosed 模块。**实验性，未在真机验证。**
 
-> TL;DR：装模块 → 作用域只勾 Android System → 看日志有没有 `would block` →
+> TL;DR：装模块 → 作用域勾 System Framework + 桌面 → 看日志有没有 `would block` →
 > 有才开 enforce。没有 `would block` 就说明你的掉帧不是这条链路，别浪费时间。
 
 ---
@@ -115,7 +115,7 @@ SDK 35，构建成功后会自动把 APK 发到 **Releases**。
 ### B. Android Studio
 
 1. 用 Android Studio 打开本目录。
-2. Gradle sync（会从 `https://api.xposed.info/` 拉 Xposed API 82，仅 compileOnly）。
+2. Gradle sync（会从 Maven Central 拉 `io.github.libxposed:api:102.0.0`，仅 compileOnly）。
 3. Build → Build APK(s)。
 4. 产物：`app/build/outputs/apk/debug/app-debug.apk`。
 
@@ -144,8 +144,8 @@ adb install -r app\build\outputs\apk\debug\app-debug.apk
 
 1. LSPosed → 模块 → 启用 **HyperOS Desktop Smooth**。
    （模块没有启动图标，装完在 LSPosed 管理器里找。）
-2. 作用域**先只勾 Android System**（包名 `android`，即 system_server）。
-   先不要勾桌面——这样应用侧 trim 封顶完全不介入，基线干净。
+2. 作用域**先只勾 System Framework**（虚拟包 `system`，即 system_server）。
+   桌面应用稍后再加。
 3. 重启。system_server 的钩子只在启动时安装。
 4. 看日志：
 
@@ -179,6 +179,51 @@ would block setProcessMemoryTrimLevel(com.miui.home)
 
 确认命中后，再把桌面应用加进 LSPosed 作用域（启用第 1 节表格里的 trim 封顶），
 然后进入第 5 节。
+
+### 一条日志都没有？
+
+日志只在模块被 LSPosed 加载进作用域进程时才会出现。按顺序查：
+
+1. APK 真的装了吗：
+
+   ```powershell
+   adb shell pm path dev.hyperosfix.desktop
+   ```
+
+   输出为空 → 没装（或包名被改过，用
+   `adb shell pm list packages | Select-String hyperos` 找）。
+
+2. LSPosed 里启用了吗？作用域勾了吗？
+   - 只勾桌面：只有桌面进程启动时才有日志。先 `adb shell am force-stop <pkg>` 再回桌面。
+   - 只勾 System Framework：开机后几秒内才有日志。
+   - 两个都不勾：一条都不会有。
+
+3. 改完作用域**重启**了吗？system_server 的钩子只在启动时安装。
+
+4. 看缓冲，不要只看实时流：
+
+   ```powershell
+   adb logcat -d -b all -s HyperOSDesktopFix
+   ```
+
+   不确定就把整个缓冲区拉下来搜：
+
+   ```powershell
+   adb logcat -d | Select-String -Pattern "HyperOSDesktopFix|LSPosed|Xposed" | Select-Object -Last 80
+   ```
+
+5. 还不行，看 LSPosed 管理器 → **日志**，搜 `hyperosfix`。常见原因：
+   - 模块没被识别（`META-INF/xposed/module.prop` 没打包进去）；
+   - `META-INF/xposed/java_init.list` 里的类名找不到；
+   - `minApiVersion` / `targetApiVersion` 不匹配（本仓库是 101 / 102）。
+
+6. 确认 LSPosed 真的注入到了 system_server：
+
+   ```powershell
+   adb shell 'su -c "grep -c lspd /proc/$(pidof system_server)/maps"'
+   ```
+
+   输出 `0` = 没注入，通常是作用域没勾或 LSPosed 没启用。
 
 ---
 
@@ -297,14 +342,15 @@ hyperos-desktop-smooth/
 │  ├─ proguard-rules.pro
 │  └─ src/main/
 │     ├─ AndroidManifest.xml
-│     ├─ assets/xposed_init
+│     ├─ resources/META-INF/xposed/{module.prop,java_init.list,scope.list}
 │     ├─ res/values/strings.xml
 │     └─ java/dev/hyperosfix/desktop/
-│        ├─ HookEntry.java     # 入口，分派 system_server / 桌面进程
-│        ├─ SystemHooks.java   # CachedAppOptimizer + AMS trim
-│        ├─ AppHooks.java      # onTrimMemory 封顶
-│        ├─ Targets.java       # 包名/UID 解析与匹配
-│        └─ L.java             # 双通道日志 + 限流
+│        ├─ ModernEntry.java    # libxposed 102 入口
+│        ├─ SystemHooks.java    # CachedAppOptimizer + AMS trim
+│        ├─ AppHooks.java       # onTrimMemory 封顶
+│        ├─ Targets.java        # 包名/UID 解析与匹配
+│        ├─ Reflect.java        # 反射 helper（替代 XposedHelpers）
+│        └─ L.java              # logcat 日志 + 限流
 ├─ tools/
 │  ├─ diagnose.ps1             # 采样 page fault / swap / gfxinfo
 │  ├─ apply-system.ps1         # 开/关 enforce
@@ -320,6 +366,9 @@ hyperos-desktop-smooth/
 
 ## 11. 设计备注
 
+- 使用 **libxposed API 102**：LSPosed 2.x 把 system_server 定义成虚拟包 `system`，
+  旧版 `assets/xposed_init` 模块拿不到这个作用域，必须用
+  `META-INF/xposed/*` + `XposedModule` 才能注入系统框架和 HyperOS Runtime。
 - 没有引入 native 库：普通进程 `mlockall` 拿不到足够 `RLIMIT_MEMLOCK`，
   在 Java 模块里塞一个必然失败的 native 调用没有意义。
 - 没有 hook `freezeProcessNoLock`：外层 `freezeProcess` 负责状态记账，
